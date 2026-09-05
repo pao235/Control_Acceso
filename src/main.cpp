@@ -36,6 +36,8 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/queue.h>
+#include <SD.h>
+#include <SPI.h>
 
 // ==================== CONFIGURACIÓN DE RED Y SERVICIOS ====================
 const char* ssid = "INFINITUM40CE";
@@ -57,7 +59,7 @@ String formatDateTime(const RtcDateTime& dt);
 WiFiClient espClient;
 PubSubClient client(espClient);
 
-ThreeWire myWire(4, 15, 23);       // Pines DAT, CLK, RST del RTC DS1302
+ThreeWire myWire(4, 15, 25);       // Pines DAT, CLK, RST del RTC DS1302
 RtcDS1302<ThreeWire> rtc(myWire);
 
 WIEGAND wg;                        // Lector Wiegand (teclado matricial + RFID)
@@ -101,6 +103,12 @@ typedef enum {
     TIME_SRC_RTC
 } TimeSource;
 
+// Mensaje para la cola de la SD
+typedef struct {
+    char csvLinea[100]; 
+} SDMessage;
+
+
 volatile TimeSource timeSource = TIME_SRC_RTC;   // Se actualiza solo desde TaskRTC
 
 // ==================== ESTADO DE CONFIRMACIÓN MQTT ====================
@@ -118,7 +126,8 @@ QueueHandle_t queueWiegand;   // Declarada pero no usada actualmente en el flujo
 QueueHandle_t queueMQTT;      // TaskWiegand -> TaskMQTT (payloads JSON a publicar)
 QueueHandle_t queueLCD;       // TaskWiegand -> TaskLCD (qué mostrar en pantalla)
 QueueHandle_t queueRTC;       // TaskRTC -> TaskWiegand (hora actual, tamaño 1 + overwrite)
-
+QueueHandle_t queueSD;        // Para la escritura en la memoria SD
+SemaphoreHandle_t mutexSD; // Protege el acceso a la memoria
 // ==================== PROTOTIPOS ====================
 
 void printDateTime(const RtcDateTime& dt, char* buffer, size_t length);
@@ -139,9 +148,8 @@ void TaskWiegand(void *pvParameters);
 void TaskRTC(void *pvParameters);
 void TaskMQTT(void *pvParameters);
 void TaskWIFI(void *pvParameters);
-
 void mqttCallback(char* topic, byte* payload, unsigned int length);
-
+void TaskSD(void *pvParameters);
 
 
 // ==================== SETUP ====================
@@ -156,6 +164,17 @@ void setup()
 
     lcd.init();
     lcd.backlight();
+
+    // Crear Mutex y Cola para la SD
+    mutexSD = xSemaphoreCreateMutex();
+    queueSD = xQueueCreate(10, sizeof(SDMessage));
+
+    // Inicializar la tarjeta SD en el pin CS (5)
+    if (!SD.begin(5)) {
+        Serial.println("Error inicializando la MicroSD.");
+    } else {
+        Serial.println("MicroSD inicializada correctamente.");
+    }
 
     stMac = WiFi.macAddress(); // Se puede leer la MAC sin estar conectado
     Serial.print("MAC: ");
@@ -177,6 +196,7 @@ void setup()
     xTaskCreatePinnedToCore(TaskWiegand, "Wiegand", 4096, NULL, 3, NULL, 1);
     xTaskCreatePinnedToCore(TaskLCD,     "LCD",     4096, NULL, 1, NULL, 0);
     xTaskCreatePinnedToCore(TaskRTC,     "RTC",     4096, NULL, 1, NULL, 0);
+    xTaskCreatePinnedToCore(TaskSD,     "TaskSD",   4096, NULL, 1, NULL, 0);
 }
 
 // todo el trabajo corre en las tareas de FreeRTOS.
@@ -482,11 +502,26 @@ void TaskWiegand(void *pvParameters) {
                         doc["direccionMAC"] = stMac;
                         doc["fecha"]        = formatDateTime(now);
 
-                        MQTTMessage mqttMsg;
-                        serializeJson(doc, mqttMsg.payload, sizeof(mqttMsg.payload));
-                        xQueueSend(queueMQTT, &mqttMsg, 0);
+                        // ---> INICIO DE ENRUTAMIENTO (TECLADO) <---
+                        if (WiFi.status() == WL_CONNECTED && client.connected()) {
+                            // Flujo normal: enviar a queueMQTT
+                            MQTTMessage mqttMsg;
+                            serializeJson(doc, mqttMsg.payload, sizeof(mqttMsg.payload));
+                            xQueueSend(queueMQTT, &mqttMsg, 0);
+                            Serial.printf("[Wiegand] Codigo a MQTT: %s\n", mqttMsg.payload);
+                        } else {
+                            // Flujo offline: enviar a queueSD en formato CSV
+                            SDMessage sdMsg;
+                            snprintf(sdMsg.csvLinea, sizeof(sdMsg.csvLinea), "%s,%s,%s\n", 
+                                     doc["id"].as<const char*>(), 
+                                     stMac.c_str(), 
+                                     doc["fecha"].as<const char*>());
+                                     
+                            xQueueSend(queueSD, &sdMsg, 0);
+                            Serial.println("[Wiegand] Codigo a SD (Offline)");
+                        }
+                        // ---> FIN DE ENRUTAMIENTO (TECLADO) <---
 
-                        Serial.printf("[Wiegand] Codigo enviado: %s\n", mqttMsg.payload);
                     } else {
                         // Código incompleto, avisa error en pantalla
                         LCDMessage lcdMsg = { LCD_ERROR, "" };
@@ -525,14 +560,28 @@ void TaskWiegand(void *pvParameters) {
                 doc["direccionMAC"] = stMac;
                 doc["fecha"]        = formatDateTime(now);
 
-                MQTTMessage mqttMsg;
-                serializeJson(doc, mqttMsg.payload, sizeof(mqttMsg.payload));
-                xQueueSend(queueMQTT, &mqttMsg, 0);
+                // ---> INICIO DE ENRUTAMIENTO (TARJETA) <---
+                if (WiFi.status() == WL_CONNECTED && client.connected()) {
+                    // Flujo normal: enviar a queueMQTT
+                    MQTTMessage mqttMsg;
+                    serializeJson(doc, mqttMsg.payload, sizeof(mqttMsg.payload));
+                    xQueueSend(queueMQTT, &mqttMsg, 0);
+                    Serial.printf("[Wiegand] Tarjeta a MQTT: %s\n", mqttMsg.payload);
+                } else {
+                    // Flujo offline: enviar a queueSD en formato CSV
+                    SDMessage sdMsg;
+                    snprintf(sdMsg.csvLinea, sizeof(sdMsg.csvLinea), "%s,%s,%s\n", 
+                             doc["id"].as<const char*>(), 
+                             stMac.c_str(), 
+                             doc["fecha"].as<const char*>());
+                             
+                    xQueueSend(queueSD, &sdMsg, 0);
+                    Serial.println("[Wiegand] Tarjeta a SD (Offline)");
+                }
+                // ---> FIN DE ENRUTAMIENTO (TARJETA) <---
 
                 LCDMessage lcdMsg = { LCD_OK, "" };
                 xQueueSend(queueLCD, &lcdMsg, 0);
-
-                Serial.printf("[Wiegand] Tarjeta: %s\n", mqttMsg.payload);
             }
         }
 
@@ -620,5 +669,27 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     if (esperandoConfirmacion && strcmp(mensaje, ultimoPayloadEnviado) == 0) {
         esperandoConfirmacion = false;
         Serial.println("[MQTT] Confirmacion recibida: el broker distribuyo el mensaje.");
+    }
+}
+
+void TaskSD(void *pvParameters) {
+    SDMessage msg;
+    while(1) {
+        // portMAX_DELAY hace que la tarea no consuma CPU mientras la cola esté vacía
+        if (xQueueReceive(queueSD, &msg, portMAX_DELAY)) {
+            
+            // Tomar el Mutex antes de tocar la SD
+            if (xSemaphoreTake(mutexSD, pdMS_TO_TICKS(1000)) == pdTRUE) {
+                File file = SD.open("/registros.csv", FILE_APPEND);
+                if (file) {
+                    file.print(msg.csvLinea);
+                    file.close();
+                    Serial.println("[SD] Registro guardado offline.");
+                } else {
+                    Serial.println("[SD] Error abriendo archivo.");
+                }
+                xSemaphoreGive(mutexSD); // Liberar el Mutex
+            }
+        }
     }
 }
