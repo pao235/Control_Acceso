@@ -40,17 +40,21 @@
 #include <SPI.h>
 
 // ==================== CONFIGURACIÓN DE RED Y SERVICIOS ====================
-const char* ssid = "INFINITUM40CE";
-const char* password = "Vxs78tcu7z";
+const char* ssid = "FAM_VALENZUELA";
+const char* password = "6143973503valenzuela";
 const char* ntpServer = "mx.pool.ntp.org";
 const long gmtOffset_sec = -21600;     // UTC-6 (Chihuahua, sin horario de verano)
 const int daylightOffset_sec = 0;
 
-const char* mqtt_server = "meztli.ddns.net";
+//const char* mqtt_server = "meztli.ddns.net";
+//const int mqtt_port = 1883;
+//const char* mqtt_user = "usuario";
+//const char* mqtt_passwd = "a12345";
+const char* mqtt_server = "mqtt-dashboard.com";
 const int mqtt_port = 1883;
 const char* mqtt_topic = "esp32/control/numeros";
-const char* mqtt_user = "usuario";
-const char* mqtt_passwd = "a12345";
+const char* mqtt_user = "";
+const char* mqtt_passwd = "";
 
 String stMac = ""; // MAC del dispositivo, se llena una sola vez en setup()
 String formatDateTime(const RtcDateTime& dt);
