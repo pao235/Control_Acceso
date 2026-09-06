@@ -7,7 +7,7 @@
  * Authors:      Ana Cardona, Emiliano Pérez, Luis Anchondo
  * Updated:      05/2026
  * Created on:   15 jun. 2026
- * updated:      24/08/2026
+ * updated:      06/09/2026
  **************************************************************************************************************************/
 /**************************************************************************************************************************
  * * Copyright (C) 2026 by Ana Cardona, Emiliano Pérez, Luis Anchondo - TecNM /IT Chihuahua
@@ -15,7 +15,7 @@
  * Se permite la redistribucion, modificacion o uso de este software en formato fuente o binario
  * siempre que los archivos mantengan estos derechos de autor.
  * Los usuarios pueden modificar esto y usarlo para aprender sobre el campo de IoT, control de acceso, microcontroladores 
- * y sistemas embebidos.Se permite el uso de este software para fines educativos y de investigación.
+ * y sistemas embebidos. Se permite el uso de este software para fines educativos y de investigación.
  * Ana Cardona, Emiliano Pérez, Luis Anchondo y el TecNM /IT Chihuahua no son responsables del mal uso de este material.
  **************************************************************************************************************************/
 
@@ -23,67 +23,81 @@
   *          LIBRERÍAS USADAS
   *****************************************/
 #include <Arduino.h>
-#include <Wire.h>
-#include <WiFi.h>
+#include <Wire.h>              // Maneja la comunicación I2C (usada por la pantalla LCD)
+#include <WiFi.h>              // Funciones específicas para controlar el módulo de reloj
 #include <Wiegand.h>           // Lectura de lector Wiegand (teclado + RFID)
-#include <ThreeWire.h>        // Interfaz de 3 hilos para el RTC DS1302
+#include <ThreeWire.h>         // Interfaz de 3 hilos para el RTC DS1302
 #include <RtcDS1302.h>
-#include <time.h>             // Para funciones de hora vía NTP (configTime, getLocalTime)
+#include <time.h>              // Para funciones de hora vía NTP (configTime, getLocalTime)
 #include <LiquidCrystal_I2C.h>
-#include <PubSubClient.h>     // Cliente MQTT
-#include <ArduinoJSON.h>      // Uso de JSON para armar el payload a enviar por MQTT
+#include <PubSubClient.h>      // Cliente MQTT para conectarse al broker, publicar y suscribirse
+#include <ArduinoJSON.h>       // Permite construir y leer estructuras JSON (el formato de los mensajes)
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/queue.h>
-#include <SD.h>
-#include <SPI.h>
+#include <SD.h>                // Sistema de archivos para leer y crear archivos (como el .csv)
+#include <SPI.h>               // Maneja el bus de comunicación SPI que utiliza el lector MicroSD
 
 // ==================== CONFIGURACIÓN DE RED Y SERVICIOS ====================
+// Credenciales para la conexión a la red WiFi local
 const char* ssid = "FAM_VALENZUELA";
 const char* password = "6143973503valenzuela";
+// Servidor NTP para sincronizar la hora por internet
 const char* ntpServer = "mx.pool.ntp.org";
-const long gmtOffset_sec = -21600;     // UTC-6 (Chihuahua, sin horario de verano)
+// Desplazamiento horario, -21600 segundos equivale a UTC-6 (Zona horaria de Chihuahua)
+const long gmtOffset_sec = -21600;     
+// Ajuste para horario de verano (0 porque en Chihuahua ya no se aplica)
 const int daylightOffset_sec = 0;
 
+// === BLOQUE DEL BROKER PRIVADO ===
+// Estas líneas están desactivadas mientras se hacen pruebas con el broker público
 //const char* mqtt_server = "meztli.ddns.net";
 //const int mqtt_port = 1883;
 //const char* mqtt_user = "usuario";
 //const char* mqtt_passwd = "a12345";
-const char* mqtt_server = "mqtt-dashboard.com";
-const int mqtt_port = 1883;
-const char* mqtt_topic = "esp32/control/numeros";
-const char* mqtt_user = "";
-const char* mqtt_passwd = "";
 
-String stMac = ""; // MAC del dispositivo, se llena una sola vez en setup()
+// === BLOQUE DEL BROKER DE PRUEBAS ===
+const char* mqtt_server = "mqtt-dashboard.com"; // Servidor público gratuito para pruebas
+const int mqtt_port = 1883;                     // Puerto estándar para MQTT
+const char* mqtt_topic = "esp32/control/numeros"; // Canal donde el ESP32 publicará los registros
+const char* mqtt_user = "";                     // Sin usuario para este broker de prueba
+const char* mqtt_passwd = "";                   // Sin contraseña para este broker de prueba
+
+// Variable global para guardar la dirección MAC del ESP32 (sirve como ID único del dispositivo)
+// Se inicializa en blanco y se le asigna su valor una sola vez en el setup()
+String stMac = ""; 
+
+// Toma el objeto de tiempo del RTC y lo convierte a un texto fácil de leer y enviar
 String formatDateTime(const RtcDateTime& dt);
 
 // ==================== OBJETOS DE PERIFÉRICOS ====================
-WiFiClient espClient;
-PubSubClient client(espClient);
+WiFiClient espClient; // Crea un cliente de red básico usando la antena WiFi del ESP32
+PubSubClient client(espClient); // Crea el cliente MQTT. Toma el espClient de red para poder enviar y recibir mensajes del broker
 
 ThreeWire myWire(4, 15, 25);       // Pines DAT, CLK, RST del RTC DS1302
-RtcDS1302<ThreeWire> rtc(myWire);
+RtcDS1302<ThreeWire> rtc(myWire); // Inicializa el objeto principal del reloj usando los pines declarados arriba
 
 WIEGAND wg;                        // Lector Wiegand (teclado matricial + RFID)
 LiquidCrystal_I2C lcd(0x27, 16, 2);
 
-const String buildingCode = "1";     
-String codigoAcumulado = "";           
+const String buildingCode = "1"; // Identificador del edificio donde vino el registro 
+String codigoAcumulado = "";     // Para acumular los dígitos que se van ingresando desde el teclado Wiegand     
 
+// Para calcular el tamaño de un arreglo
 #define countof(a) (sizeof(a) / sizeof(a[0]))
 
 // ==================== STRUCTS Y ENUMS ====================
-// Evento crudo leído del Wiegand (código + tipo de trama, ej. 26/34 bits para
-// tarjetas, 4/8 para teclado). Actualmente no se usa como tal para pasar por
-// cola (el envío a MQTT se arma directo en TaskWiegand), pero queda definido
+// Guarda el número leído (code) y de qué tipo es (type = 4 u 8 bits para teclas, 26 o 34 bits para tarjetas RFID)
+// Actualmente no se usa como tal para pasar porcola (el envío a MQTT se arma directo en TaskWiegand),
+// pero queda definido
 typedef struct {
     uint32_t code;
     int      type;
 } EventoAcceso;
 
-// Mensaje que viaja por queueMQTT un payload JSON ya serializado como texto
+// Paquete que viaja por la cola queueMQTT. Contiene un arreglo de 200 letras
+// donde guardamos el mensaje JSON ya formateado para internet
 typedef struct {
     char payload[200];   // Si el JSON crece (más campos), revisar que no se trunque
 } MQTTMessage;
@@ -101,59 +115,86 @@ typedef struct {
     char    texto[32];   // Usado solo por LCD_CODIGO para mostrar el código acumulado
 } LCDMessage;
 
-// Fuente de tiempo activa, NTP (mientras haya WiFi) o RTC físico como respaldo.
+// Fuente de tiempo activa, NTP (mientras haya WiFi) o RTC físico como respaldo
 typedef enum {
     TIME_SRC_NTP,
     TIME_SRC_RTC
 } TimeSource;
 
-// Mensaje para la cola de la SD
+// Paquete que viaja por la cola queueSD. Contiene una línea de texto de 100 caracteres lista para guardarse en el 
+// archivo CSV de la memoria (ej. "ID,MAC,FECHA\n")
 typedef struct {
     char csvLinea[100]; 
 } SDMessage;
 
-
+// Variable global que indica si estamos usando la hora de internet (NTP) o del módulo físico (RTC)
 volatile TimeSource timeSource = TIME_SRC_RTC;   // Se actualiza solo desde TaskRTC
 
 // ==================== ESTADO DE CONFIRMACIÓN MQTT ====================
-// Como PubSubClient usa QoS 0 (sin ACK de aplicación),
-// se asume que el broker/topic re-envía el mismo payload que se publicó, y
-// eso se usa como confirmación de entrega. Uso exclusivo de TaskMQTT y su
-// callback (mqttCallback), que corre en el mismo contexto que client.loop().
+// Como la librería PubSubClient usa calidad de servicio 0 (QoS 0), envía los datos
+// pero el servidor no le responde un Recibido. Para solucionar esto, el ESP32
+// se suscribe a su propio canal. Si envía un mensaje y luego lo recibe de 
+// vuelta (un eco), sabe que el mensaje sí llegó al servidor
+
+// Bandera para saber si el ESP32 está esperando ese eco del servidor
 volatile bool esperandoConfirmacion = false;
+
+// Búfer (memoria temporal) para guardar una copia del último mensaje enviado,
+// así podemos compararlo con el eco cuando regrese.
 char ultimoPayloadEnviado[200];
+
+// Guarda el momento exacto (en milisegundos) en que se envió el mensaje
 unsigned long tiempoEnvio = 0;
+
+// Tiempo máximo de espera para recibir el eco
 const unsigned long TIMEOUT_CONFIRMACION_MS = 5000;
 
 // ==================== COLAS (comunicación entre tareas) ====================
 QueueHandle_t queueWiegand;   // Declarada pero no usada actualmente en el flujo mostrado
-QueueHandle_t queueMQTT;      // TaskWiegand -> TaskMQTT (payloads JSON a publicar)
-QueueHandle_t queueLCD;       // TaskWiegand -> TaskLCD (qué mostrar en pantalla)
-QueueHandle_t queueRTC;       // TaskRTC -> TaskWiegand (hora actual, tamaño 1 + overwrite)
-QueueHandle_t queueSD;        // Para la escritura en la memoria SD
+// Buzón donde la tarea de lectura deja el JSON; la tarea MQTT lo recoge y lo envía a internet
+QueueHandle_t queueMQTT;      
+// Buzón donde la tarea de lectura deja las instrucciones; la tarea LCD las recoge y actualiza la pantalla
+QueueHandle_t queueLCD;       
+// Buzón especial de tamaño 1. La tarea del reloj pone aquí la hora más reciente, y cualquier otra tarea la puede leer
+QueueHandle_t queueRTC;       
+// Buzón donde la tarea de lectura deja el texto CSV para que la tarea SD lo guarde físicamente
+QueueHandle_t queueSD;
 SemaphoreHandle_t mutexSD; // Protege el acceso a la memoria
+
 // ==================== PROTOTIPOS ====================
 
+// Funciones de tiempo
 void printDateTime(const RtcDateTime& dt, char* buffer, size_t length);
 void syncRTCFromNTP();
+
+// Funciones del teclado
 char decodeKeypad(uint32_t code);
+
+// Funciones de la pantalla LCD
 void lcdInicio();
 void lcdMostrarCodigo(String codigo);
 void lcdError();
 void lcdMensajeCorrecto();
 void lcdMostrarHora();
+
+// Función de reconexión a internet
 void reconnectMQTT();
 
-void enviarJson(const String& id, const RtcDateTime& dt);   // NOTA: prototipada pero
-                                                              // nunca definida ni llamada.
+// NOTA DE DESARROLLO: Esta función se planeó pero nunca se programó su lógica ("cuerpo"). 
+// Ocupa espacio visual, se podría borrar si no se va a usar.
+void enviarJson(const String& id, const RtcDateTime& dt);   
 
+// Prototipos de las Tareas de FreeRTOS. Todas reciben un puntero "pvParameters" 
+// (un requisito estándar de FreeRTOS aunque no siempre se use).
 void TaskLCD(void *pvParameters);
 void TaskWiegand(void *pvParameters);
 void TaskRTC(void *pvParameters);
 void TaskMQTT(void *pvParameters);
 void TaskWIFI(void *pvParameters);
-void mqttCallback(char* topic, byte* payload, unsigned int length);
 void TaskSD(void *pvParameters);
+
+// Prototipo de la función que se "dispara" automáticamente cuando llega un mensaje de MQTT.
+void mqttCallback(char* topic, byte* payload, unsigned int length);
 
 
 // ==================== SETUP ====================
