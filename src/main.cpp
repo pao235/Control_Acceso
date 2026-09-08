@@ -179,6 +179,7 @@ void lcdMostrarHora();
 
 // Función de reconexión a internet
 void reconnectMQTT();
+void sincronizarDatosOffline();
 
 // NOTA DE DESARROLLO: Esta función se planeó pero nunca se programó su lógica ("cuerpo"). 
 // Ocupa espacio visual, se podría borrar si no se va a usar.
@@ -380,6 +381,7 @@ String formatDateTime(const RtcDateTime& dt) {
 // Intenta reconectar al broker MQTT sin bloquear indefinidamente: solo lo
 // intenta si ya pasaron 5s desde el último intento y si hay WiFi disponible
 // Se llama en cada ciclo de TaskMQTT
+// Intenta reconectar al broker MQTT sin bloquear indefinidamente
 void reconnectMQTT() {
     static unsigned long lastAttempt = 0;
     unsigned long ahora = millis();
@@ -394,14 +396,84 @@ void reconnectMQTT() {
     }
 
     Serial.print("Intentando conectar a MQTT... ");
-    if (client.connect("ESP32Client", mqtt_user, mqtt_passwd)) {
-    Serial.println("Conexión exitosa.");
-    client.subscribe(mqtt_topic);   // Se suscribe al mismo tópico donde publica,
-                                     // necesario para el mecanismo de "eco/confirmación".
+    
+    String clientId = "ControlAcceso-" + stMac;
+    
+    if (client.connect(clientId.c_str(), mqtt_user, mqtt_passwd)) {
+        Serial.println("Conexión exitosa.");
+        client.subscribe(mqtt_topic);
+
+        // Llamada a la función de sincronización de datos offline después de reconectar
+        sincronizarDatosOffline();
+
     } else {
         Serial.print("Error rc=");
         Serial.println(client.state());
     }
+}
+
+// Función exclusiva para leer la SD y enviar los datos retenidos
+void sincronizarDatosOffline() {
+    // Intentamos tomar el Mutex. Si falla, salimos inmediatamente
+    if (xSemaphoreTake(mutexSD, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        Serial.println("[SD] Mutex ocupado, reintentando en el próximo ciclo.");
+        return; 
+    }
+
+    // Si no hay archivo, devolvemos la llave y salimos (Retorno temprano)
+    if (!SD.exists("/registros.csv")) {
+        xSemaphoreGive(mutexSD);
+        return; 
+    }
+
+    Serial.println("[SD] Archivo encontrado. Sincronizando datos...");
+    File file = SD.open("/registros.csv", FILE_READ);
+    
+    // Si el archivo falló al abrirse, devolvemos la llave y salimos
+    if (!file) {
+        Serial.println("[SD] Error al abrir archivo para lectura.");
+        xSemaphoreGive(mutexSD);
+        return;
+    }
+
+    // Ciclo de lectura
+    while (file.available()) {
+        String linea = file.readStringUntil('\n');
+        linea.trim(); // Limpiamos basura
+        
+        // Si la línea está en blanco, saltamos a la siguiente vuelta del ciclo (continue)
+        if (linea.length() == 0) continue; 
+        
+        int primeraComa = linea.indexOf(',');
+        int segundaComa = linea.indexOf(',', primeraComa + 1);
+        
+        // Validamos que la línea tenga exactamente el formato esperado
+        if (primeraComa > 0 && segundaComa > 0) {
+            String idOff    = linea.substring(0, primeraComa);
+            String macOff   = linea.substring(primeraComa + 1, segundaComa);
+            String fechaOff = linea.substring(segundaComa + 1);
+
+            JsonDocument doc;
+            doc["id"]           = idOff;
+            doc["direccionMAC"] = macOff;
+            doc["fecha"]        = fechaOff;
+
+            char payloadOffline[200];
+            serializeJson(doc, payloadOffline, sizeof(payloadOffline));
+
+            client.publish(mqtt_topic, payloadOffline);
+            Serial.printf("[MQTT] Sincronizado: %s\n", payloadOffline);
+            
+            client.loop(); 
+            vTaskDelay(pdMS_TO_TICKS(150)); 
+        }
+    }
+    file.close();
+    
+    // Limpieza final y liberación del Mutex
+    SD.remove("/registros.csv"); 
+    Serial.println("[SD] Sincronización completada. Archivo borrado.");
+    xSemaphoreGive(mutexSD); 
 }
 
 // ==================== TAREAS ====================
