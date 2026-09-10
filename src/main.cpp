@@ -51,18 +51,18 @@ const long gmtOffset_sec = -21600;
 const int daylightOffset_sec = 0;
 
 // === BLOQUE DEL BROKER PRIVADO ===
-// Estas líneas están desactivadas mientras se hacen pruebas con el broker público
-//const char* mqtt_server = "meztli.ddns.net";
-//const int mqtt_port = 1883;
-//const char* mqtt_user = "usuario";
-//const char* mqtt_passwd = "a12345";
+const char* mqtt_server = "meztli.ddns.net";
+const int mqtt_port = 1883;
+const char* mqtt_topic = "control"; // Canal donde el ESP32 publicará los registros
+const char* mqtt_user = "usuario";
+const char* mqtt_passwd = "a12345";
 
-// === BLOQUE DEL BROKER DE PRUEBAS ===
+/*// === BLOQUE DEL BROKER DE PRUEBAS ===
 const char* mqtt_server = "mqtt-dashboard.com"; // Servidor público gratuito para pruebas
 const int mqtt_port = 1883;                     // Puerto estándar para MQTT
 const char* mqtt_topic = "esp32/control/numeros"; // Canal donde el ESP32 publicará los registros
 const char* mqtt_user = "";                     // Sin usuario para este broker de prueba
-const char* mqtt_passwd = "";                   // Sin contraseña para este broker de prueba
+const char* mqtt_passwd = "";                   // Sin contraseña para este broker de prueba*/
 
 // Variable global para guardar la dirección MAC del ESP32 (sirve como ID único del dispositivo)
 // Se inicializa en blanco y se le asigna su valor una sola vez en el setup()
@@ -397,9 +397,9 @@ void reconnectMQTT() {
 
     Serial.print("Intentando conectar a MQTT... ");
     
-    String clientId = "ControlAcceso-" + stMac;
+    // String clientId = "ControlAcceso-" + stMac;
     
-    if (client.connect(clientId.c_str(), mqtt_user, mqtt_passwd)) {
+    if (client.connect("ESP32Client", mqtt_user, mqtt_passwd)) {
         Serial.println("Conexión exitosa.");
         client.subscribe(mqtt_topic);
 
