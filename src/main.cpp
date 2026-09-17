@@ -42,7 +42,7 @@
 
 // ==================== CONFIGURACIÓN DE RED Y SERVICIOS ====================
 // Credenciales para la conexión a la red WiFi local
-const char* ssid = "LAB_Electronica_intel";
+const char* ssid = "LAB_Electronica_Intel";
 const char* password = "1ntelp4ntera2026";
 // Servidor NTP para sincronizar la hora por internet
 const char* ntpServer = "mx.pool.ntp.org";
@@ -432,7 +432,7 @@ void setup()
     xTaskCreatePinnedToCore(TaskLCD,     "LCD",     4096, NULL, 1, NULL, 0);
     xTaskCreatePinnedToCore(TaskRTC,     "RTC",     4096, NULL, 1, NULL, 0);
     xTaskCreatePinnedToCore(TaskSD,     "TaskSD",   4096, NULL, 1, NULL, 0);
-    xTaskCreatePinnedToCore(TaskMonitorColas, "MonColas", 2048, NULL, 1, NULL, 0);
+    xTaskCreatePinnedToCore(TaskMonitorColas, "MonColas", 2048, NULL, 2, NULL, 0);
 }
 
 // todo el trabajo corre en las tareas de FreeRTOS.
