@@ -163,6 +163,15 @@ QueueHandle_t queueRTC;
 QueueHandle_t queueSD;
 SemaphoreHandle_t mutexSD; // Protege el acceso a la memoria
 
+// ==================== MÉTRICAS DE COLAS ====================
+volatile UBaseType_t maxQueueMQTT = 0;
+volatile UBaseType_t maxQueueSD   = 0;
+volatile UBaseType_t maxQueueLCD  = 0;
+
+volatile uint32_t eventosDescartadosMQTT = 0;
+volatile uint32_t eventosDescartadosSD   = 0;
+
+
 // ==================== PROTOTIPOS DE FUNCIONES ====================
 
 /**
@@ -370,7 +379,14 @@ void TaskWIFI(void *pvParameters);
  */
 void TaskSD(void *pvParameters);
 
-
+/**
+ * @brief  Monitorea el estado de las colas y registra métricas
+ *         Esta tarea opcional revisa periódicamente el tamaño máximo alcanzado 
+ *        por cada cola y la cantidad de eventos descartados. Puede ser útil para
+ *       depuración y optimización del sistema, pero no es crítica para la operación.
+ * 
+ */
+void TaskMonitorColas(void *pvParameters);
 
 // ==================== SETUP ====================
 
@@ -416,6 +432,7 @@ void setup()
     xTaskCreatePinnedToCore(TaskLCD,     "LCD",     4096, NULL, 1, NULL, 0);
     xTaskCreatePinnedToCore(TaskRTC,     "RTC",     4096, NULL, 1, NULL, 0);
     xTaskCreatePinnedToCore(TaskSD,     "TaskSD",   4096, NULL, 1, NULL, 0);
+    xTaskCreatePinnedToCore(TaskMonitorColas, "MonColas", 2048, NULL, 1, NULL, 0);
 }
 
 // todo el trabajo corre en las tareas de FreeRTOS.
@@ -755,25 +772,46 @@ void TaskWiegand(void *pvParameters) {
                         doc["direccionMAC"] = stMac;
                         doc["fecha"]        = formatDateTime(now);
 
-                        // ---> INICIO DE ENRUTAMIENTO (TECLADO) <---
+                        // ---> ENRUTAMIENTO INSTRUMENTADO (TECLADO) <---
                         if (WiFi.status() == WL_CONNECTED && client.connected()) {
-                            // Flujo normal: enviar a queueMQTT
                             MQTTMessage mqttMsg;
                             serializeJson(doc, mqttMsg.payload, sizeof(mqttMsg.payload));
-                            xQueueSend(queueMQTT, &mqttMsg, 0);
-                            Serial.printf("[Wiegand] Codigo a MQTT: %s\n", mqttMsg.payload);
+
+                            // Registrar ocupación pico antes de enviar
+                            UBaseType_t waiting = uxQueueMessagesWaiting(queueMQTT);
+                            if (waiting + 1 > maxQueueMQTT) {
+                                maxQueueMQTT = waiting + 1;
+                            }
+
+                            // Intentar encolar (timeout 0) y detectar descarte
+                            if (xQueueSend(queueMQTT, &mqttMsg, 0) != pdPASS) {
+                                eventosDescartadosMQTT++;
+                                Serial.println("[QUEUE ERROR] queueMQTT saturada. Evento teclado descartado.");
+                            } else {
+                                Serial.printf("[Wiegand] Codigo a MQTT: %s\n", mqttMsg.payload);
+                            }
                         } else {
-                            // Flujo offline: enviar a queueSD en formato CSV
                             SDMessage sdMsg;
                             snprintf(sdMsg.csvLinea, sizeof(sdMsg.csvLinea), "%s,%s,%s\n", 
                                      doc["id"].as<const char*>(), 
                                      stMac.c_str(), 
                                      doc["fecha"].as<const char*>());
-                                     
-                            xQueueSend(queueSD, &sdMsg, 0);
-                            Serial.println("[Wiegand] Codigo a SD (Offline)");
+
+                            // Registrar ocupación pico en cola SD
+                            UBaseType_t waiting = uxQueueMessagesWaiting(queueSD);
+                            if (waiting + 1 > maxQueueSD) {
+                                maxQueueSD = waiting + 1;
+                            }
+
+                            // Intentar encolar (timeout 0) y detectar descarte
+                            if (xQueueSend(queueSD, &sdMsg, 0) != pdPASS) {
+                                eventosDescartadosSD++;
+                                Serial.println("[QUEUE ERROR] queueSD saturada. Evento teclado descartado.");
+                            } else {
+                                Serial.println("[Wiegand] Codigo a SD (Offline)");
+                            }
                         }
-                        // ---> FIN DE ENRUTAMIENTO (TECLADO) <---
+                        // ---> FIN ENRUTAMIENTO (TECLADO) <---
 
                     } else {
                         // Código incompleto, avisa error en pantalla
@@ -799,39 +837,57 @@ void TaskWiegand(void *pvParameters) {
 
             } else {
                 // Tarjeta RFID (Wiegand 26/34)
-                // Mismo patrón de obtención de hora que en el caso de teclado
                 RtcDateTime now;
                 if (xQueuePeek(queueRTC, &now, pdMS_TO_TICKS(200)) != pdTRUE) {
                     now = rtc.GetDateTime();
                     Serial.println("[Wiegand] queueRTC vacia, leyendo RTC directo.");
                 }
 
-                // Para tarjetas, el id se arma con "0" + el código leído del Wiegand
-                // (sin el buildingCode que sí se usa en el flujo de teclado)
                 JsonDocument doc;
                 doc["id"]           = "0" + String(evento.code);
                 doc["direccionMAC"] = stMac;
                 doc["fecha"]        = formatDateTime(now);
 
-                // ---> INICIO DE ENRUTAMIENTO (TARJETA) <---
+                // ---> ENRUTAMIENTO INSTRUMENTADO (TARJETA) <---
                 if (WiFi.status() == WL_CONNECTED && client.connected()) {
-                    // Flujo normal: enviar a queueMQTT
                     MQTTMessage mqttMsg;
                     serializeJson(doc, mqttMsg.payload, sizeof(mqttMsg.payload));
-                    xQueueSend(queueMQTT, &mqttMsg, 0);
-                    Serial.printf("[Wiegand] Tarjeta a MQTT: %s\n", mqttMsg.payload);
+
+                    // Registrar ocupación pico antes de enviar
+                    UBaseType_t waiting = uxQueueMessagesWaiting(queueMQTT);
+                    if (waiting + 1 > maxQueueMQTT) {
+                        maxQueueMQTT = waiting + 1;
+                    }
+
+                    // Intentar encolar (timeout 0) y detectar descarte
+                    if (xQueueSend(queueMQTT, &mqttMsg, 0) != pdPASS) {
+                        eventosDescartadosMQTT++;
+                        Serial.println("[QUEUE ERROR] queueMQTT saturada. Evento RFID descartado.");
+                    } else {
+                        Serial.printf("[Wiegand] Tarjeta a MQTT: %s\n", mqttMsg.payload);
+                    }
                 } else {
-                    // Flujo offline: enviar a queueSD en formato CSV
                     SDMessage sdMsg;
                     snprintf(sdMsg.csvLinea, sizeof(sdMsg.csvLinea), "%s,%s,%s\n", 
                              doc["id"].as<const char*>(), 
                              stMac.c_str(), 
                              doc["fecha"].as<const char*>());
-                             
-                    xQueueSend(queueSD, &sdMsg, 0);
-                    Serial.println("[Wiegand] Tarjeta a SD (Offline)");
+
+                    // Registrar ocupación pico en cola SD
+                    UBaseType_t waiting = uxQueueMessagesWaiting(queueSD);
+                    if (waiting + 1 > maxQueueSD) {
+                        maxQueueSD = waiting + 1;
+                    }
+
+                    // Intentar encolar (timeout 0) y detectar descarte
+                    if (xQueueSend(queueSD, &sdMsg, 0) != pdPASS) {
+                        eventosDescartadosSD++;
+                        Serial.println("[QUEUE ERROR] queueSD saturada. Evento RFID descartado.");
+                    } else {
+                        Serial.println("[Wiegand] Tarjeta a SD (Offline)");
+                    }
                 }
-                // ---> FIN DE ENRUTAMIENTO (TARJETA) <---
+                // ---> FIN ENRUTAMIENTO (TARJETA) <---
 
                 LCDMessage lcdMsg = { LCD_OK, "" };
                 xQueueSend(queueLCD, &lcdMsg, 0);
@@ -935,5 +991,20 @@ void TaskSD(void *pvParameters) {
                 xSemaphoreGive(mutexSD); // Liberar el Mutex
             }
         }
+    }
+}
+
+void TaskMonitorColas(void *pvParameters) {
+    while (1) {
+        Serial.println("\n========== MÉTRICAS DE COLAS (FreeRTOS) ==========");
+        Serial.printf("queueMQTT -> Actual: %u/10 | Pico Max: %u/10 | Descartados: %u\n",
+                      uxQueueMessagesWaiting(queueMQTT), maxQueueMQTT, eventosDescartadosMQTT);
+        Serial.printf("queueSD   -> Actual: %u/10 | Pico Max: %u/10 | Descartados: %u\n",
+                      uxQueueMessagesWaiting(queueSD), maxQueueSD, eventosDescartadosSD);
+        Serial.printf("queueLCD  -> Actual: %u/10\n",
+                      uxQueueMessagesWaiting(queueLCD));
+        Serial.println("==================================================\n");
+
+        vTaskDelay(pdMS_TO_TICKS(10000)); // Imprime cada 10 segundos
     }
 }
