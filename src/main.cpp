@@ -42,8 +42,8 @@
 
 // ==================== CONFIGURACIÓN DE RED Y SERVICIOS ====================
 // Credenciales para la conexión a la red WiFi local
-const char* ssid = "LAB_Electronica_Intel";
-const char* password = "1ntelp4ntera2026";
+const char* ssid = "";
+const char* password = "";
 // Servidor NTP para sincronizar la hora por internet
 const char* ntpServer = "mx.pool.ntp.org";
 // Desplazamiento horario, -21600 segundos equivale a UTC-6 (Zona horaria de Chihuahua)
