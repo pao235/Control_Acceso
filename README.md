@@ -24,7 +24,7 @@ Diseñado bajo la arquitectura FreeRTOS, las tareas operativas se distribuyen en
 Este desarrollo representa la implementación práctica del trabajo de investigación presentado en el TecNM / Instituto Tecnológico de Chihuahua:
 
 > **Referencia Bibliográfica:**  
-> E. Trujillo-Preciado, J. A. Dominguez-Terrazas, O. Beltrán-Gómez, L. A. Anchondo-Carreón, A. P. Cardona-Valenzuela, y E. Pérez-Dyck, *"Implementación y uso de nodos de registro de acceso RFID basados en arquitectura publicador-suscriptor en la red IoT del Instituto Tecnológico de Chihuahua"*, Departamento de Eléctrica y Electrónica / Ciencias Básicas, Instituto Tecnológico de Chihuahua, 2026.
+Trujillo-Preciado, E.; Domínguez-Terrazas, J.A.; Beltrán-Gómez, O.; Anchondo-Carreón, L.A.; Cardona-Valenzuela, A.P.; Pérez-Dyck, E., "Diseño de un Nodo de Registro de Accesos RFID Basado en Arquitectura Publicador-Suscriptor en la Red IoT del Instituto Tecnológico de Chihuahua", Revista ELECTRO, Vol. 47, 2025, pp. 335-340. https://doi.org/10.67458/re2025a28335340
 
 ---
 
