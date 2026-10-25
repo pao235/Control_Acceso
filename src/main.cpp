@@ -7,7 +7,7 @@
  * Authors:      Ana Cardona, Emiliano Pérez, Luis Anchondo
  * Updated:      05/2026
  * Created on:   15 jun. 2026
- * updated:      24/08/2026
+ * updated:      13/09/2026
  **************************************************************************************************************************/
 /**************************************************************************************************************************
  * * Copyright (C) 2026 by Ana Cardona, Emiliano Pérez, Luis Anchondo - TecNM /IT Chihuahua
@@ -15,7 +15,7 @@
  * Se permite la redistribucion, modificacion o uso de este software en formato fuente o binario
  * siempre que los archivos mantengan estos derechos de autor.
  * Los usuarios pueden modificar esto y usarlo para aprender sobre el campo de IoT, control de acceso, microcontroladores 
- * y sistemas embebidos.Se permite el uso de este software para fines educativos y de investigación.
+ * y sistemas embebidos. Se permite el uso de este software para fines educativos y de investigación.
  * Ana Cardona, Emiliano Pérez, Luis Anchondo y el TecNM /IT Chihuahua no son responsables del mal uso de este material.
  **************************************************************************************************************************/
 
@@ -23,61 +23,76 @@
   *          LIBRERÍAS USADAS
   *****************************************/
 #include <Arduino.h>
-#include <Wire.h>
-#include <WiFi.h>
+#include <Wire.h>              // Maneja la comunicación I2C (usada por la pantalla LCD)
+#include <WiFi.h>              // Funciones específicas para controlar el módulo de reloj
 #include <Wiegand.h>           // Lectura de lector Wiegand (teclado + RFID)
-#include <ThreeWire.h>        // Interfaz de 3 hilos para el RTC DS1302
+#include <ThreeWire.h>         // Interfaz de 3 hilos para el RTC DS1302
 #include <RtcDS1302.h>
-#include <time.h>             // Para funciones de hora vía NTP (configTime, getLocalTime)
+#include <time.h>              // Para funciones de hora vía NTP (configTime, getLocalTime)
 #include <LiquidCrystal_I2C.h>
-#include <PubSubClient.h>     // Cliente MQTT
-#include <ArduinoJSON.h>      // Uso de JSON para armar el payload a enviar por MQTT
-
+#include <PubSubClient.h>      // Cliente MQTT para conectarse al broker, publicar y suscribirse
+#include <ArduinoJSON.h>       // Permite construir y leer estructuras JSON (el formato de los mensajes)
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/queue.h>
+#include <SD.h>                // Sistema de archivos para leer y crear archivos (como el .csv)
+#include <SPI.h>               // Maneja el bus de comunicación SPI que utiliza el lector MicroSD
+
+
 
 // ==================== CONFIGURACIÓN DE RED Y SERVICIOS ====================
-const char* ssid = "INFINITUM40CE";
-const char* password = "Vxs78tcu7z";
+// Credenciales para la conexión a la red WiFi local
+const char* ssid = "LAB_Electronica_Intel";
+const char* password = "1ntelp4ntera2026";
+// Servidor NTP para sincronizar la hora por internet
 const char* ntpServer = "mx.pool.ntp.org";
-const long gmtOffset_sec = -21600;     // UTC-6 (Chihuahua, sin horario de verano)
+// Desplazamiento horario, -21600 segundos equivale a UTC-6 (Zona horaria de Chihuahua)
+const long gmtOffset_sec = -21600;     
+// Ajuste para horario de verano (0 porque en Chihuahua ya no se aplica)
 const int daylightOffset_sec = 0;
 
+// ======================= BLOQUE DEL BROKER PRIVADO ==========================
 const char* mqtt_server = "meztli.ddns.net";
 const int mqtt_port = 1883;
-const char* mqtt_topic = "esp32/control/numeros";
+const char* mqtt_topic = "control"; // Canal donde el ESP32 publicará los registros
 const char* mqtt_user = "usuario";
 const char* mqtt_passwd = "a12345";
 
-String stMac = ""; // MAC del dispositivo, se llena una sola vez en setup()
-String formatDateTime(const RtcDateTime& dt);
+/*// ======================= BLOQUE DEL BROKER DE PRUEBAS ======================
+const char* mqtt_server = "mqtt-dashboard.com"; // Servidor público gratuito para pruebas
+const int mqtt_port = 1883;                     // Puerto estándar para MQTT
+const char* mqtt_topic = "esp32/control/numeros"; // Canal donde el ESP32 publicará los registros
+const char* mqtt_user = "";                     // Sin usuario para este broker de prueba
+const char* mqtt_passwd = "";                   // Sin contraseña para este broker de prueba*/
+
 
 // ==================== OBJETOS DE PERIFÉRICOS ====================
-WiFiClient espClient;
-PubSubClient client(espClient);
+WiFiClient espClient; // Crea un cliente de red básico usando la antena WiFi del ESP32
+PubSubClient client(espClient); // Crea el cliente MQTT. Toma el espClient de red para poder enviar y recibir mensajes del broker
 
-ThreeWire myWire(4, 15, 23);       // Pines DAT, CLK, RST del RTC DS1302
-RtcDS1302<ThreeWire> rtc(myWire);
+ThreeWire myWire(4, 15, 25);       // Pines DAT, CLK, RST del RTC DS1302
+RtcDS1302<ThreeWire> rtc(myWire); // Inicializa el objeto principal del reloj usando los pines declarados arriba
 
 WIEGAND wg;                        // Lector Wiegand (teclado matricial + RFID)
 LiquidCrystal_I2C lcd(0x27, 16, 2);
 
-const String buildingCode = "1";     
-String codigoAcumulado = "";           
+const String buildingCode = "1"; // Identificador del edificio donde vino el registro 
+String codigoAcumulado = "";     // Para acumular los dígitos que se van ingresando desde el teclado Wiegand     
 
+// Para calcular el tamaño de un arreglo
 #define countof(a) (sizeof(a) / sizeof(a[0]))
 
 // ==================== STRUCTS Y ENUMS ====================
-// Evento crudo leído del Wiegand (código + tipo de trama, ej. 26/34 bits para
-// tarjetas, 4/8 para teclado). Actualmente no se usa como tal para pasar por
-// cola (el envío a MQTT se arma directo en TaskWiegand), pero queda definido
+// Guarda el número leído (code) y de qué tipo es (type = 4 u 8 bits para teclas, 26 o 34 bits para tarjetas RFID)
+// Actualmente no se usa como tal para pasar porcola (el envío a MQTT se arma directo en TaskWiegand),
+// pero queda definido
 typedef struct {
     uint32_t code;
     int      type;
 } EventoAcceso;
 
-// Mensaje que viaja por queueMQTT un payload JSON ya serializado como texto
+// Paquete que viaja por la cola queueMQTT. Contiene un arreglo de 200 letras
+// donde guardamos el mensaje JSON ya formateado para internet
 typedef struct {
     char payload[200];   // Si el JSON crece (más campos), revisar que no se trunque
 } MQTTMessage;
@@ -95,58 +110,286 @@ typedef struct {
     char    texto[32];   // Usado solo por LCD_CODIGO para mostrar el código acumulado
 } LCDMessage;
 
-// Fuente de tiempo activa, NTP (mientras haya WiFi) o RTC físico como respaldo.
+// Fuente de tiempo activa, NTP (mientras haya WiFi) o RTC físico como respaldo
 typedef enum {
     TIME_SRC_NTP,
     TIME_SRC_RTC
 } TimeSource;
 
-volatile TimeSource timeSource = TIME_SRC_RTC;   // Se actualiza solo desde TaskRTC
+// Paquete que viaja por la cola queueSD. Contiene una línea de texto de 100 caracteres lista para guardarse en el 
+// archivo CSV de la memoria (ej. "ID,MAC,FECHA\n")
+typedef struct {
+    char csvLinea[100]; 
+} SDMessage;
+
 
 // ==================== ESTADO DE CONFIRMACIÓN MQTT ====================
-// Como PubSubClient usa QoS 0 (sin ACK de aplicación),
-// se asume que el broker/topic re-envía el mismo payload que se publicó, y
-// eso se usa como confirmación de entrega. Uso exclusivo de TaskMQTT y su
-// callback (mqttCallback), que corre en el mismo contexto que client.loop().
+// Como la librería PubSubClient usa calidad de servicio 0 (QoS 0), envía los datos
+// pero el servidor no le responde un Recibido. Para solucionar esto, el ESP32
+// se suscribe a su propio canal. Si envía un mensaje y luego lo recibe de 
+// vuelta (un eco), sabe que el mensaje sí llegó al servidor
+
+// Bandera para saber si el ESP32 está esperando ese eco del servidor
 volatile bool esperandoConfirmacion = false;
+
+// Búfer (memoria temporal) para guardar una copia del último mensaje enviado,
+// así podemos compararlo con el eco cuando regrese.
 char ultimoPayloadEnviado[200];
+
+// Guarda el momento exacto (en milisegundos) en que se envió el mensaje
 unsigned long tiempoEnvio = 0;
+
+// Tiempo máximo de espera para recibir el eco
 const unsigned long TIMEOUT_CONFIRMACION_MS = 5000;
+
+// ==================== VARIABLES GLOBALES ====================
+
+// Variable global para guardar la dirección MAC del ESP32 (sirve como ID único del dispositivo)
+// Se inicializa en blanco y se le asigna su valor una sola vez en el setup()
+String stMac = ""; 
+
+// Variable global que indica si estamos usando la hora de internet (NTP) o del módulo físico (RTC)
+volatile TimeSource timeSource = TIME_SRC_RTC;   // Se actualiza solo desde TaskRTC
 
 // ==================== COLAS (comunicación entre tareas) ====================
 QueueHandle_t queueWiegand;   // Declarada pero no usada actualmente en el flujo mostrado
-QueueHandle_t queueMQTT;      // TaskWiegand -> TaskMQTT (payloads JSON a publicar)
-QueueHandle_t queueLCD;       // TaskWiegand -> TaskLCD (qué mostrar en pantalla)
-QueueHandle_t queueRTC;       // TaskRTC -> TaskWiegand (hora actual, tamaño 1 + overwrite)
+// Buzón donde la tarea de lectura deja el JSON; la tarea MQTT lo recoge y lo envía a internet
+QueueHandle_t queueMQTT;      
+// Buzón donde la tarea de lectura deja las instrucciones; la tarea LCD las recoge y actualiza la pantalla
+QueueHandle_t queueLCD;       
+// Buzón especial de tamaño 1. La tarea del reloj pone aquí la hora más reciente, y cualquier otra tarea la puede leer
+QueueHandle_t queueRTC;       
+// Buzón donde la tarea de lectura deja el texto CSV para que la tarea SD lo guarde físicamente
+QueueHandle_t queueSD;
+SemaphoreHandle_t mutexSD; // Protege el acceso a la memoria
 
-// ==================== PROTOTIPOS ====================
+// ==================== MÉTRICAS DE COLAS ====================
+volatile UBaseType_t maxQueueMQTT = 0;
+volatile UBaseType_t maxQueueSD   = 0;
+volatile UBaseType_t maxQueueLCD  = 0;
 
-void printDateTime(const RtcDateTime& dt, char* buffer, size_t length);
+volatile uint32_t eventosDescartadosMQTT = 0;
+volatile uint32_t eventosDescartadosSD   = 0;
+
+
+// ==================== PROTOTIPOS DE FUNCIONES ====================
+
+/**
+ * @brief  Formatea un objeto de tiempo en una cadena de texto legible
+ *         Toma las propiedades del objeto RtcDateTime (día, mes, año,
+ *         hora, minuto y segundo) y las formatea bajo el estándar
+ *         DD/MM/YYYY HH:MM:SS utilizando un buffer temporal.
+ *
+ * @param  dt      Referencia constante al objeto RtcDateTime a formatear
+ * @return String  Cadena de texto con la fecha y hora lista para el JSON
+ */
+String formatDateTime(const RtcDateTime& dt);
+
+
+/**
+ * @brief  Sincroniza el RTC físico con la hora obtenida por NTP
+ *         Se conecta al servidor NTP configurado, intenta obtener la hora 
+ *         local (bloqueando la ejecución hasta 10 segundos) y actualiza 
+ *         el módulo RTC DS1302 con los datos recibidos.
+ *
+ * @param  Ninguno
+ * @return void
+ */
 void syncRTCFromNTP();
+
+
+/**
+ * @brief  Traduce los códigos que entrega el lector Wiegand a caracteres
+ *         Recibe el código en formato de 4 u 8 bits y devuelve la tecla
+ *         correspondiente en formato ASCII. Si el código no está en la
+ *         lista, devuelve un carácter de error ('?').
+ *
+ * @param  code  Código numérico de 32 bits leído por el protocolo Wiegand
+ * @return char  Carácter ASCII de la tecla presionada ('0'-'9', '*', '#') o '?' si es inválido
+ */
 char decodeKeypad(uint32_t code);
+
+
+/**
+ * @brief  Muestra la pantalla inicial de inserción de código
+ *         Limpia el display LCD y coloca el texto de bienvenida solicitando 
+ *         al usuario que inserte su número de control. Debe ser llamada 
+ *         exclusivamente por la tarea del LCD.
+ *
+ * @param  Ninguno
+ * @return void
+ */
 void lcdInicio();
+
+
+/**
+ * @brief  Muestra en pantalla el código de control que se va acumulando
+ *         Limpia la pantalla LCD, muestra el texto "NC: " seguido del 
+ *         código acumulado y la hora actual. Debe ser llamada exclusivamente 
+ *         por la tarea del LCD.
+ *
+ * @param  codigo  Cadena de texto con los dígitos ingresados hasta el momento
+ * @return void
+ */
 void lcdMostrarCodigo(String codigo);
+
+
+/**
+ * @brief  Muestra una advertencia en pantalla por código incompleto
+ *         Limpia la pantalla LCD, muestra un mensaje indicando que faltan 
+ *         dígitos, bloquea la tarea de la pantalla por 1.5 segundos (sin 
+ *         afectar el resto del sistema) y regresa a la pantalla de inicio.
+ *
+ * @param  Ninguno
+ * @return void
+ */
 void lcdError();
+
+
+/**
+ * @brief  Muestra un mensaje de éxito en pantalla
+ *         Limpia la pantalla LCD, muestra un mensaje indicando que el código es válido
+ *         y bloquea la tarea de la pantalla por 1.5 segundos (sin afectar el resto del sistema).
+ *
+ * @param  Ninguno
+ * @return void
+ */
 void lcdMensajeCorrecto();
+
+/**
+ * @brief  Muestra la hora actual en pantalla
+ *         Limpia la pantalla LCD y muestra la hora actual del RTC.
+ *
+ * @param  Ninguno
+ * @return void
+ */
 void lcdMostrarHora();
+
+
+/**
+ * @brief  Intenta reconectar el dispositivo al broker MQTT
+ *         Verifica si hay conexión WiFi y si han pasado al menos 5 segundos 
+ *         desde el último intento. Si las condiciones se cumplen, intenta 
+ *         conectar al broker y llama a sincronizar los datos offline.
+ *
+ * @param  Ninguno
+ * @return void
+ */
 void reconnectMQTT();
 
-void enviarJson(const String& id, const RtcDateTime& dt);   // NOTA: prototipada pero
-                                                              // nunca definida ni llamada.
 
-void TaskLCD(void *pvParameters);
-void TaskWiegand(void *pvParameters);
-void TaskRTC(void *pvParameters);
-void TaskMQTT(void *pvParameters);
-void TaskWIFI(void *pvParameters);
+/**
+ * @brief  Envía por MQTT los registros guardados en la MicroSD
+ *         Toma el control del Mutex de la tarjeta SD, abre el archivo CSV
+ *         donde se guardaron los accesos fuera de línea, lee cada línea,
+ *         la transforma a formato JSON y la publica en el broker MQTT.
+ *         Al finalizar con éxito, elimina el archivo CSV.
+ *
+ * @param  Ninguno
+ * @return void
+ */
+void sincronizarDatosOffline();
 
+
+/**
+ * @brief  Función de respuesta (callback) del cliente MQTT
+ *         Se ejecuta internamente cada vez que llega un mensaje al tópico 
+ *         suscrito. Compara el payload recibido con el último enviado para 
+ *         validar si el broker distribuyó exitosamente el dato (eco).
+ *
+ * @param  topic    Cadena con el nombre del tópico que recibió el mensaje
+ * @param  payload  Puntero al arreglo de bytes recibidos (contenido del mensaje)
+ * @param  length   Longitud total del mensaje recibido en bytes
+ * @return void
+ */
 void mqttCallback(char* topic, byte* payload, unsigned int length);
 
 
+// ==================== PROTOTIPOS DE TAREAS DE FREERTOS ====================
+
+/**
+ * @brief  Controla la visualización de datos en la pantalla I2C
+ *         Se mantiene a la espera de mensajes a través de su propia cola. 
+ *         Dependiendo del tipo de instrucción recibida, muestra el código 
+ *         tecleado, advertencias o confirmación, y siempre actualiza la hora.
+ *
+ * @param  pvParameters  Puntero a parámetros de FreeRTOS (no utilizado)
+ * @return void          Las tareas de FreeRTOS no retornan valores
+ */
+void TaskLCD(void *pvParameters);
+
+
+/**
+ * @brief  Tarea de FreeRTOS para la lectura del periférico Wiegand
+ *         Se ejecuta en un bucle infinito muestreando el lector cada 10 ms.
+ *         Acumula los dígitos si es teclado (hasta 8) o lee la tarjeta RFID.
+ *         Empaqueta la información con la fecha/hora del RTC y la envía a 
+ *         la cola MQTT (si hay red) o a la SD (si está offline).
+ *
+ * @param  pvParameters  Puntero a parámetros de FreeRTOS (típicamente NULL, no utilizado)
+ * @return void          Las tareas de FreeRTOS no retornan valores
+ */
+void TaskWiegand(void *pvParameters);
+
+
+/**
+ * @brief  Gestiona y provee la fuente de tiempo del sistema
+ *         Intenta sincronizar la hora por servidor NTP si hay WiFi. 
+ *         Determina si la fuente activa es NTP o el RTC físico, y publica 
+ *         la hora exacta cada segundo en una cola que reemplaza su valor.
+ *
+ * @param  pvParameters  Puntero a parámetros de FreeRTOS (no utilizado)
+ * @return void          Las tareas de FreeRTOS no retornan valores
+ */
+void TaskRTC(void *pvParameters);
+
+
+/**
+ * @brief  Administra la comunicación de datos hacia el broker
+ *         Mantiene activa la conexión MQTT, extrae los paquetes JSON de la 
+ *         cola y los publica. También gestiona un temporizador para 
+ *         confirmar (vía eco) si el broker recibió el mensaje correctamente.
+ *
+ * @param  pvParameters  Puntero a parámetros de FreeRTOS (no utilizado)
+ * @return void          Las tareas de FreeRTOS no retornan valores
+ */
+void TaskMQTT(void *pvParameters);
+
+
+/**
+ * @brief  Tarea de FreeRTOS encargada de la conexión de red
+ *         Monitorea constantemente el estado de la conexión WiFi. Si 
+ *         detecta una desconexión, realiza múltiples intentos con retardos 
+ *         para reconectar al SSID proporcionado utilizando las credenciales.
+ *
+ * @param  pvParameters  Puntero a parámetros de FreeRTOS (no utilizado)
+ * @return void          Las tareas de FreeRTOS no retornan valores
+ */
+void TaskWIFI(void *pvParameters);
+
+
+/**
+ * @brief  Almacena de manera persistente los registros sin conexión
+ *         Espera cadenas de texto en formato CSV a través de su cola. Cuando 
+ *         recibe una, toma de manera segura el Mutex de la MicroSD, abre el 
+ *         archivo en modo de adición (append) y guarda el nuevo registro.
+ *
+ * @param  pvParameters  Puntero a parámetros de FreeRTOS (no utilizado)
+ * @return void          Las tareas de FreeRTOS no retornan valores
+ */
+void TaskSD(void *pvParameters);
+
+/**
+ * @brief  Monitorea el estado de las colas y registra métricas
+ *         Esta tarea opcional revisa periódicamente el tamaño máximo alcanzado 
+ *        por cada cola y la cantidad de eventos descartados. Puede ser útil para
+ *       depuración y optimización del sistema, pero no es crítica para la operación.
+ * 
+ */
+void TaskMonitorColas(void *pvParameters);
 
 // ==================== SETUP ====================
-// Inicializa periféricos, crea las colas y lanza las 5 tareas de FreeRTOS
-// No se conecta a WiFi aquí, eso lo hace TaskWIFI
+
 void setup()
 {
     Serial.begin(115200);
@@ -156,6 +399,17 @@ void setup()
 
     lcd.init();
     lcd.backlight();
+
+    // Crear Mutex y Cola para la SD
+    mutexSD = xSemaphoreCreateMutex();
+    queueSD = xQueueCreate(10, sizeof(SDMessage));
+
+    // Inicializar la tarjeta SD en el pin CS (5)
+    if (!SD.begin(5)) {
+        Serial.println("Error inicializando la MicroSD.");
+    } else {
+        Serial.println("MicroSD inicializada correctamente.");
+    }
 
     stMac = WiFi.macAddress(); // Se puede leer la MAC sin estar conectado
     Serial.print("MAC: ");
@@ -177,6 +431,8 @@ void setup()
     xTaskCreatePinnedToCore(TaskWiegand, "Wiegand", 4096, NULL, 3, NULL, 1);
     xTaskCreatePinnedToCore(TaskLCD,     "LCD",     4096, NULL, 1, NULL, 0);
     xTaskCreatePinnedToCore(TaskRTC,     "RTC",     4096, NULL, 1, NULL, 0);
+    xTaskCreatePinnedToCore(TaskSD,     "TaskSD",   4096, NULL, 1, NULL, 0);
+    xTaskCreatePinnedToCore(TaskMonitorColas, "MonColas", 2048, NULL, 2, NULL, 0);
 }
 
 // todo el trabajo corre en las tareas de FreeRTOS.
@@ -184,18 +440,6 @@ void loop() {}
 
 // ==================== OTRAS FUNCIONES ====================
 
-/*// Formatea fecha/hora como MM/DD/YYYY HH:MM:SS.
-void printDateTime(const RtcDateTime& dt, char* buffer, size_t length) {
-    snprintf_P(buffer, length,
-        PSTR("%02u/%02u/%04u %02u:%02u:%02u"),
-        dt.Month(), dt.Day(), dt.Year(),
-        dt.Hour(), dt.Minute(), dt.Second());
-}*/
-
-// Sincroniza el RTC físico con la hora obtenida por NTP. Bloquea hasta 10s
-// esperando respuesta del servidor. No se usa directamente en el flujo de
-// tareas (TaskRTC hace su propia sincronización en línea), pero queda
-// disponible para llamarse manualmente si se requiere
 void syncRTCFromNTP() {
     // Solo sincroniza si ya hay WiFi conectado
     //if (WiFi.status() != WL_CONNECTED) return;
@@ -222,8 +466,6 @@ void syncRTCFromNTP() {
     Serial.println("RTC actualizado con hora NTP.");
 }
 
-// Traduce los códigos que entrega el Wiegand en modo teclado (tipo 4/8)
-// a su tecla correspondiente. '?' indica una tecla no reconocida.
 char decodeKeypad(uint32_t code) {
     switch (code) {
         case 0x1B: return '*';
@@ -243,9 +485,6 @@ char decodeKeypad(uint32_t code) {
 }
 
 // ==================== LCD (solo llamar desde TaskLCD) ====================
-// Estas funciones tocan el objeto lcd directamente y usan vTaskDelay, por
-// lo que solo deben invocarse desde el contexto de TaskLCD para no bloquear
-// otras tareas ni generar condiciones de carrera sobre el bus I2C
 
 void lcdInicio() {
     lcd.clear();
@@ -255,7 +494,6 @@ void lcdInicio() {
     lcd.print("de control:");
 }
 
-// Muestra el código de control que se va acumulando, junto con la hora
 void lcdMostrarCodigo(String codigo) {
     lcd.clear();
     lcd.setCursor(0, 0);
@@ -264,19 +502,16 @@ void lcdMostrarCodigo(String codigo) {
     lcdMostrarHora();
 }
 
-// Pantalla de error (código incompleto). Bloquea 1.5 s dentro de la propia
-// tarea de LCD (no afecta a las demás) y regresa a la pantalla de inicio
 void lcdError() {
     lcd.clear();
     lcd.setCursor(0, 0);
     lcd.print("Error:");
     lcd.setCursor(0, 1);
     lcd.print("8 digitos req.");
-    vTaskDelay(pdMS_TO_TICKS(1500));  // no-blocking en tarea
+    vTaskDelay(pdMS_TO_TICKS(1500)); 
     lcdInicio();
 }
 
-// Pantalla de acceso correcto (código completo o tarjeta válida)
 void lcdMensajeCorrecto() {
     lcd.clear();
     lcd.setCursor(0, 0);
@@ -286,8 +521,6 @@ void lcdMensajeCorrecto() {
     lcdInicio();
 }
 
-// Refresca solo la segunda línea con la hora actual, leída directo del RTC
-// (no de queueRTC). Se llama en cada ciclo de TaskLCD.
 void lcdMostrarHora() {
     RtcDateTime now = rtc.GetDateTime();
     char horaBuffer[10];
@@ -299,8 +532,6 @@ void lcdMostrarHora() {
     lcd.print(horaBuffer);
 }
 
-// Formatea fecha/hora como DD/MM/YYYY HH:MM:SS. Esta es la función realmente
-// usada para el campo fecha del JSON enviado por MQTT.
 String formatDateTime(const RtcDateTime& dt) {
     char buf[20];
     snprintf_P(buf, sizeof(buf),
@@ -312,9 +543,6 @@ String formatDateTime(const RtcDateTime& dt) {
 
 // ==================== MQTT ====================
 
-// Intenta reconectar al broker MQTT sin bloquear indefinidamente: solo lo
-// intenta si ya pasaron 5s desde el último intento y si hay WiFi disponible
-// Se llama en cada ciclo de TaskMQTT
 void reconnectMQTT() {
     static unsigned long lastAttempt = 0;
     unsigned long ahora = millis();
@@ -329,20 +557,87 @@ void reconnectMQTT() {
     }
 
     Serial.print("Intentando conectar a MQTT... ");
+    
+    // String clientId = "ControlAcceso-" + stMac;
+    
     if (client.connect("ESP32Client", mqtt_user, mqtt_passwd)) {
-    Serial.println("Conexión exitosa.");
-    client.subscribe(mqtt_topic);   // Se suscribe al mismo tópico donde publica,
-                                     // necesario para el mecanismo de "eco/confirmación".
+        Serial.println("Conexión exitosa.");
+        client.subscribe(mqtt_topic);
+
+        // Llamada a la función de sincronización de datos offline después de reconectar
+        sincronizarDatosOffline();
+
     } else {
         Serial.print("Error rc=");
         Serial.println(client.state());
     }
 }
 
+void sincronizarDatosOffline() {
+    // Intentamos tomar el Mutex. Si falla, salimos inmediatamente
+    if (xSemaphoreTake(mutexSD, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        Serial.println("[SD] Mutex ocupado, reintentando en el próximo ciclo.");
+        return; 
+    }
+
+    // Si no hay archivo, devolvemos la llave y salimos (Retorno temprano)
+    if (!SD.exists("/registros.csv")) {
+        xSemaphoreGive(mutexSD);
+        return; 
+    }
+
+    Serial.println("[SD] Archivo encontrado. Sincronizando datos...");
+    File file = SD.open("/registros.csv", FILE_READ);
+    
+    // Si el archivo falló al abrirse, devolvemos la llave y salimos
+    if (!file) {
+        Serial.println("[SD] Error al abrir archivo para lectura.");
+        xSemaphoreGive(mutexSD);
+        return;
+    }
+
+    // Ciclo de lectura
+    while (file.available()) {
+        String linea = file.readStringUntil('\n');
+        linea.trim(); // Limpiamos basura
+        
+        // Si la línea está en blanco, saltamos a la siguiente vuelta del ciclo (continue)
+        if (linea.length() == 0) continue; 
+        
+        int primeraComa = linea.indexOf(',');
+        int segundaComa = linea.indexOf(',', primeraComa + 1);
+        
+        // Validamos que la línea tenga exactamente el formato esperado
+        if (primeraComa > 0 && segundaComa > 0) {
+            String idOff    = linea.substring(0, primeraComa);
+            String macOff   = linea.substring(primeraComa + 1, segundaComa);
+            String fechaOff = linea.substring(segundaComa + 1);
+
+            JsonDocument doc;
+            doc["id"]           = idOff;
+            doc["direccionMAC"] = macOff;
+            doc["fecha"]        = fechaOff;
+
+            char payloadOffline[200];
+            serializeJson(doc, payloadOffline, sizeof(payloadOffline));
+
+            client.publish(mqtt_topic, payloadOffline);
+            Serial.printf("[MQTT] Sincronizado: %s\n", payloadOffline);
+            
+            client.loop(); 
+            vTaskDelay(pdMS_TO_TICKS(150)); 
+        }
+    }
+    file.close();
+    
+    // Limpieza final y liberación del Mutex
+    SD.remove("/registros.csv"); 
+    Serial.println("[SD] Sincronización completada. Archivo borrado.");
+    xSemaphoreGive(mutexSD); 
+}
+
 // ==================== TAREAS ====================
 
-// Mantiene la conexión WiFi activa. Si se desconecta, reintenta cada 10 s,
-// esperando hasta 10s (20 x 500 ms) por cada intento de conexión.
 void TaskWIFI(void *pvParameters) {
     while (1) {
         if (WiFi.status() != WL_CONNECTED) {
@@ -357,9 +652,6 @@ void TaskWIFI(void *pvParameters) {
     }
 }
 
-// Gestiona la fuente de tiempo (NTP o RTC) y publica la hora actual en
-// queueRTC cada segundo para que otras tareas (principalmente TaskWiegand)
-// la consulten sin tener que acceder al bus del RTC directamente
 void TaskRTC(void *pvParameters) {
     // Espera inicial de hasta 15s (30 x 500 ms) a que haya WiFi, antes de
     // intentar sincronizar con NTP por primera vez.
@@ -437,8 +729,6 @@ void TaskRTC(void *pvParameters) {
     }
 }
 
-// Tarea principal de captura, muestrea el lector Wiegand cada 10 ms y procesa
-// tanto entradas de teclado (tipo 4/8) como tarjetas RFID (26/34 bits)
 void TaskWiegand(void *pvParameters) {
     String codigoAcumulado = "";
 
@@ -482,11 +772,47 @@ void TaskWiegand(void *pvParameters) {
                         doc["direccionMAC"] = stMac;
                         doc["fecha"]        = formatDateTime(now);
 
-                        MQTTMessage mqttMsg;
-                        serializeJson(doc, mqttMsg.payload, sizeof(mqttMsg.payload));
-                        xQueueSend(queueMQTT, &mqttMsg, 0);
+                        // ---> ENRUTAMIENTO INSTRUMENTADO (TECLADO) <---
+                        if (WiFi.status() == WL_CONNECTED && client.connected()) {
+                            MQTTMessage mqttMsg;
+                            serializeJson(doc, mqttMsg.payload, sizeof(mqttMsg.payload));
 
-                        Serial.printf("[Wiegand] Codigo enviado: %s\n", mqttMsg.payload);
+                            // Registrar ocupación pico antes de enviar
+                            UBaseType_t waiting = uxQueueMessagesWaiting(queueMQTT);
+                            if (waiting + 1 > maxQueueMQTT) {
+                                maxQueueMQTT = waiting + 1;
+                            }
+
+                            // Intentar encolar (timeout 0) y detectar descarte
+                            if (xQueueSend(queueMQTT, &mqttMsg, 0) != pdPASS) {
+                                eventosDescartadosMQTT++;
+                                Serial.println("[QUEUE ERROR] queueMQTT saturada. Evento teclado descartado.");
+                            } else {
+                                Serial.printf("[Wiegand] Codigo a MQTT: %s\n", mqttMsg.payload);
+                            }
+                        } else {
+                            SDMessage sdMsg;
+                            snprintf(sdMsg.csvLinea, sizeof(sdMsg.csvLinea), "%s,%s,%s\n", 
+                                     doc["id"].as<const char*>(), 
+                                     stMac.c_str(), 
+                                     doc["fecha"].as<const char*>());
+
+                            // Registrar ocupación pico en cola SD
+                            UBaseType_t waiting = uxQueueMessagesWaiting(queueSD);
+                            if (waiting + 1 > maxQueueSD) {
+                                maxQueueSD = waiting + 1;
+                            }
+
+                            // Intentar encolar (timeout 0) y detectar descarte
+                            if (xQueueSend(queueSD, &sdMsg, 0) != pdPASS) {
+                                eventosDescartadosSD++;
+                                Serial.println("[QUEUE ERROR] queueSD saturada. Evento teclado descartado.");
+                            } else {
+                                Serial.println("[Wiegand] Codigo a SD (Offline)");
+                            }
+                        }
+                        // ---> FIN ENRUTAMIENTO (TECLADO) <---
+
                     } else {
                         // Código incompleto, avisa error en pantalla
                         LCDMessage lcdMsg = { LCD_ERROR, "" };
@@ -511,28 +837,60 @@ void TaskWiegand(void *pvParameters) {
 
             } else {
                 // Tarjeta RFID (Wiegand 26/34)
-                // Mismo patrón de obtención de hora que en el caso de teclado
                 RtcDateTime now;
                 if (xQueuePeek(queueRTC, &now, pdMS_TO_TICKS(200)) != pdTRUE) {
                     now = rtc.GetDateTime();
                     Serial.println("[Wiegand] queueRTC vacia, leyendo RTC directo.");
                 }
 
-                // Para tarjetas, el id se arma con "0" + el código leído del Wiegand
-                // (sin el buildingCode que sí se usa en el flujo de teclado)
                 JsonDocument doc;
                 doc["id"]           = "0" + String(evento.code);
                 doc["direccionMAC"] = stMac;
                 doc["fecha"]        = formatDateTime(now);
 
-                MQTTMessage mqttMsg;
-                serializeJson(doc, mqttMsg.payload, sizeof(mqttMsg.payload));
-                xQueueSend(queueMQTT, &mqttMsg, 0);
+                // ---> ENRUTAMIENTO INSTRUMENTADO (TARJETA) <---
+                if (WiFi.status() == WL_CONNECTED && client.connected()) {
+                    MQTTMessage mqttMsg;
+                    serializeJson(doc, mqttMsg.payload, sizeof(mqttMsg.payload));
+
+                    // Registrar ocupación pico antes de enviar
+                    UBaseType_t waiting = uxQueueMessagesWaiting(queueMQTT);
+                    if (waiting + 1 > maxQueueMQTT) {
+                        maxQueueMQTT = waiting + 1;
+                    }
+
+                    // Intentar encolar (timeout 0) y detectar descarte
+                    if (xQueueSend(queueMQTT, &mqttMsg, 0) != pdPASS) {
+                        eventosDescartadosMQTT++;
+                        Serial.println("[QUEUE ERROR] queueMQTT saturada. Evento RFID descartado.");
+                    } else {
+                        Serial.printf("[Wiegand] Tarjeta a MQTT: %s\n", mqttMsg.payload);
+                    }
+                } else {
+                    SDMessage sdMsg;
+                    snprintf(sdMsg.csvLinea, sizeof(sdMsg.csvLinea), "%s,%s,%s\n", 
+                             doc["id"].as<const char*>(), 
+                             stMac.c_str(), 
+                             doc["fecha"].as<const char*>());
+
+                    // Registrar ocupación pico en cola SD
+                    UBaseType_t waiting = uxQueueMessagesWaiting(queueSD);
+                    if (waiting + 1 > maxQueueSD) {
+                        maxQueueSD = waiting + 1;
+                    }
+
+                    // Intentar encolar (timeout 0) y detectar descarte
+                    if (xQueueSend(queueSD, &sdMsg, 0) != pdPASS) {
+                        eventosDescartadosSD++;
+                        Serial.println("[QUEUE ERROR] queueSD saturada. Evento RFID descartado.");
+                    } else {
+                        Serial.println("[Wiegand] Tarjeta a SD (Offline)");
+                    }
+                }
+                // ---> FIN ENRUTAMIENTO (TARJETA) <---
 
                 LCDMessage lcdMsg = { LCD_OK, "" };
                 xQueueSend(queueLCD, &lcdMsg, 0);
-
-                Serial.printf("[Wiegand] Tarjeta: %s\n", mqttMsg.payload);
             }
         }
 
@@ -540,9 +898,6 @@ void TaskWiegand(void *pvParameters) {
     }
 }
 
-// Consume queueLCD y actualiza la pantalla según el tipo de mensaje recibido
-// Si no llega nada en 500 ms, igual refresca la hora (para que el reloj en
-// pantalla no se quede congelado mientras no hay eventos)
 void TaskLCD(void *pvParameters) {
     LCDMessage msg;
 
@@ -558,8 +913,6 @@ void TaskLCD(void *pvParameters) {
     }
 }
 
-// Gestiona la conexión MQTT, publica los mensajes que llegan por queueMQTT,
-// y controla el timeout de confirmación (ver mqttCallback más abajo)
 void TaskMQTT(void *pvParameters) {
     MQTTMessage msg;
 
@@ -607,10 +960,6 @@ void TaskMQTT(void *pvParameters) {
     }
 }
 
-// Callback de PubSubClient: se ejecuta dentro de client.loop() (contexto de
-// TaskMQTT) cada vez que llega un mensaje al tópico suscrito. Como el
-// dispositivo está suscrito al mismo tópico donde publica, esto funciona
-// como una confirmación de que el broker distribuyó el mensaje
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
     char mensaje[200];
     size_t len = (length < sizeof(mensaje) - 1) ? length : sizeof(mensaje) - 1;
@@ -620,5 +969,42 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     if (esperandoConfirmacion && strcmp(mensaje, ultimoPayloadEnviado) == 0) {
         esperandoConfirmacion = false;
         Serial.println("[MQTT] Confirmacion recibida: el broker distribuyo el mensaje.");
+    }
+}
+
+void TaskSD(void *pvParameters) {
+    SDMessage msg;
+    while(1) {
+        // portMAX_DELAY hace que la tarea no consuma CPU mientras la cola esté vacía
+        if (xQueueReceive(queueSD, &msg, portMAX_DELAY)) {
+            
+            // Tomar el Mutex antes de tocar la SD
+            if (xSemaphoreTake(mutexSD, pdMS_TO_TICKS(1000)) == pdTRUE) {
+                File file = SD.open("/registros.csv", FILE_APPEND);
+                if (file) {
+                    file.print(msg.csvLinea);
+                    file.close();
+                    Serial.println("[SD] Registro guardado offline.");
+                } else {
+                    Serial.println("[SD] Error abriendo archivo.");
+                }
+                xSemaphoreGive(mutexSD); // Liberar el Mutex
+            }
+        }
+    }
+}
+
+void TaskMonitorColas(void *pvParameters) {
+    while (1) {
+        Serial.println("\n========== MÉTRICAS DE COLAS (FreeRTOS) ==========");
+        Serial.printf("queueMQTT -> Actual: %u/10 | Pico Max: %u/10 | Descartados: %u\n",
+                      uxQueueMessagesWaiting(queueMQTT), maxQueueMQTT, eventosDescartadosMQTT);
+        Serial.printf("queueSD   -> Actual: %u/10 | Pico Max: %u/10 | Descartados: %u\n",
+                      uxQueueMessagesWaiting(queueSD), maxQueueSD, eventosDescartadosSD);
+        Serial.printf("queueLCD  -> Actual: %u/10\n",
+                      uxQueueMessagesWaiting(queueLCD));
+        Serial.println("==================================================\n");
+
+        vTaskDelay(pdMS_TO_TICKS(10000)); // Imprime cada 10 segundos
     }
 }
