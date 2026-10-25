@@ -51,19 +51,13 @@ const long gmtOffset_sec = -21600;
 // Ajuste para horario de verano (0 porque en Chihuahua ya no se aplica)
 const int daylightOffset_sec = 0;
 
-// ======================= BLOQUE DEL BROKER PRIVADO ==========================
-const char* mqtt_server = "meztli.ddns.net";
-const int mqtt_port = 1883;
-const char* mqtt_topic = "control"; // Canal donde el ESP32 publicará los registros
-const char* mqtt_user = "usuario";
-const char* mqtt_passwd = "a12345";
 
-/*// ======================= BLOQUE DEL BROKER DE PRUEBAS ======================
+// ======================= BLOQUE DEL BROKER DE PRUEBAS ======================
 const char* mqtt_server = "mqtt-dashboard.com"; // Servidor público gratuito para pruebas
 const int mqtt_port = 1883;                     // Puerto estándar para MQTT
 const char* mqtt_topic = "esp32/control/numeros"; // Canal donde el ESP32 publicará los registros
 const char* mqtt_user = "";                     // Sin usuario para este broker de prueba
-const char* mqtt_passwd = "";                   // Sin contraseña para este broker de prueba*/
+const char* mqtt_passwd = "";                   // Sin contraseña para este broker de prueba
 
 
 // ==================== OBJETOS DE PERIFÉRICOS ====================
